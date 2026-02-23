@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>mini GFN Admin</title>
+  <style>
+    body{margin:0;background:#0a0d12;color:#e8efff;font-family:Inter,Arial,sans-serif}
+    .container{max-width:1280px;margin:0 auto;padding:18px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{background:#121827;border:1px solid #273149;border-radius:12px;padding:12px;flex:1;min-width:300px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #25304a;font-size:13px;text-align:left;vertical-align:top}
+    input,button,select{border-radius:8px;border:1px solid #2d3a57;background:#0f1626;color:white;padding:8px}
+    button{cursor:pointer;background:#245dff;border:none}
+    .badge{padding:2px 8px;border-radius:999px;font-size:11px;background:#1b2437;border:1px solid #33415e}
+    .ok{color:#4ade80}.bad{color:#ef4444}.warn{color:#f59e0b}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>🛠 mini GFN Admin Panel</h2>
+  <div class="card" id="authCard">
+    <h3>Admin Login</h3>
+    <input id="u" placeholder="admin username" />
+    <input id="p" placeholder="password" type="password" />
+    <button onclick="login()">Login</button>
+  </div>
+
+  <div id="app" style="display:none">
+    <div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="refreshAll()">Refresh all</button>
+      <button onclick="logout()">Logout</button>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h3>Devices</h3>
+        <table id="devicesTbl"></table>
+      </div>
+      <div class="card">
+        <h3>Queue</h3>
+        <table id="queueTbl"></table>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <div class="card">
+        <h3>Users</h3>
+        <table id="usersTbl"></table>
+      </div>
+      <div class="card">
+        <h3>Active / Recent sessions</h3>
+        <table id="sessionsTbl"></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('admin_token') || '';
+
+function H(extra={}){ return {'Content-Type':'application/json', ...(token?{Authorization:`Bearer ${token}`}:{}) ,...extra}; }
+async function api(url, opts={}){
+  const r = await fetch(url, opts); const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+
+async function login(){
+  try{
+    const d = await api('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u.value,password:p.value})});
+    token = d.token; localStorage.setItem('admin_token', token);
+    await init();
+  }catch(e){alert(e.message)}
+}
+
+function logout(){localStorage.removeItem('admin_token');location.reload();}
+
+async function init(){
+  try{
+    await api('/api/me',{headers:H()});
+    authCard.style.display='none';
+    app.style.display='block';
+    refreshAll();
+    setInterval(refreshAll, 5000);
+  }catch(e){console.warn(e.message)}
+}
+
+async function refreshAll(){
+  await Promise.all([loadDevices(),loadUsers(),loadQueue(),loadSessions()]);
+}
+
+async function loadDevices(){
+  const d = await api('/api/admin/devices',{headers:H()});
+  devicesTbl.innerHTML = '<tr><th>id</th><th>name</th><th>status</th><th>busy</th><th>session</th><th>health</th><th>actions</th></tr>' +
+  d.devices.map(x => `<tr>
+    <td>${x.id}</td>
+    <td>${x.name}</td>
+    <td><span class="${x.status==='online'?'ok':'bad'}">${x.status}</span>${x.maintenance?' <span class="warn">(maintenance)</span>':''}</td>
+    <td>${x.busy}</td>
+    <td>${x.currentSessionId||'-'}</td>
+    <td>battery:${x.health?.battery ?? '-'}<br><small>${(x.health?.mem||'').slice(0,50)}</small></td>
+    <td>
+      <button onclick="devAction('${x.id}','refresh')">refresh</button>
+      <button onclick="devAction('${x.id}','home')">home</button>
+      <button onclick="devAction('${x.id}','screen_on')">on</button>
+      <button onclick="devAction('${x.id}','screen_off')">off</button>
+      <button onclick="devAction('${x.id}','reboot')">reboot</button>
+      <button onclick="devAction('${x.id}','${x.maintenance?'maintenance_off':'maintenance_on'}')">${x.maintenance?'maintenance off':'maintenance on'}</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadUsers(){
+  const d = await api('/api/admin/users',{headers:H()});
+  usersTbl.innerHTML = '<tr><th>id</th><th>username</th><th>role</th><th>pro</th><th>created</th><th>actions</th></tr>' +
+  d.users.map(x => `<tr>
+    <td>${x.id}</td><td>${x.username}</td><td>${x.role}</td><td>${x.pro?'✅':'—'}</td><td>${x.createdAt}</td>
+    <td>${x.role==='admin'?'':`<button onclick="setPro('${x.id}',${!x.pro})">${x.pro?'Снять PRO':'Выдать PRO'}</button>`}</td>
+  </tr>`).join('');
+}
+
+async function loadQueue(){
+  const d = await api('/api/admin/queue',{headers:H()});
+  queueTbl.innerHTML = '<tr><th>#</th><th>user</th><th>game</th><th>pro</th><th>enqueuedAt</th></tr>' +
+    d.queue.map(x=>`<tr><td>${x.position}</td><td>${x.username}</td><td>${x.gameId}</td><td>${x.pro?'✅':'—'}</td><td>${x.enqueuedAt}</td></tr>`).join('');
+}
+
+async function loadSessions(){
+  const d = await api('/api/admin/sessions',{headers:H()});
+  const recent = d.sessions.slice().reverse().slice(0,30);
+  sessionsTbl.innerHTML = '<tr><th>id</th><th>user</th><th>game</th><th>device</th><th>status</th><th>endAt</th><th>actions</th></tr>' +
+    recent.map(s=>`<tr>
+      <td>${s.id}</td><td>${s.userId}</td><td>${s.gameTitle}</td><td>${s.deviceId}</td>
+      <td>${s.status}</td><td>${s.endAt || '-'}</td>
+      <td>${s.status==='active'?`<button onclick="termSession('${s.id}')">terminate</button>`:'-'}</td>
+    </tr>`).join('');
+}
+
+async function setPro(userId, enable){
+  await api(`/api/admin/users/${userId}/pro`,{method:'POST',headers:H(),body:JSON.stringify({enable})});
+  refreshAll();
+}
+async function termSession(id){
+  await api(`/api/admin/sessions/${id}/terminate`,{method:'POST',headers:H()});
+  refreshAll();
+}
+async function devAction(id, action){
+  await api(`/api/admin/devices/${id}/action`,{method:'POST',headers:H(),body:JSON.stringify({action})});
+  refreshAll();
+}
+
+if(token) init();
+</script>
+</body>
+</html>

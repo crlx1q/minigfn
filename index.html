@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>mini GFN via Webkey</title>
+  <style>
+    :root{--bg:#0a0d12;--card:#121824;--muted:#95a4c0;--accent:#52d0ff;--ok:#4ade80;--warn:#f59e0b;--bad:#ef4444}
+    *{box-sizing:border-box;font-family:Inter,Segoe UI,Arial,sans-serif}
+    body{margin:0;background:radial-gradient(circle at top,#111827 0,#06080c 60%);color:#eaf0ff}
+    .container{max-width:1200px;margin:0 auto;padding:20px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+    .brand{font-size:22px;font-weight:700}
+    .panel{background:var(--card);border:1px solid #20283a;border-radius:14px;padding:14px}
+    .auth{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+    input,button,select{border-radius:10px;border:1px solid #2a344b;padding:10px;background:#0d1320;color:#eaf0ff}
+    button{cursor:pointer;background:linear-gradient(135deg,#1f77ff,#16b8ff);border:none;font-weight:600}
+    button.ghost{background:#1a2233;border:1px solid #2e3b58}
+    .games{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:12px}
+    .game{background:#0e1524;border:1px solid #26324b;border-radius:12px;padding:10px}
+    .thumb{height:100px;border-radius:10px;background:linear-gradient(135deg,#4b5563,#1f2937);margin-bottom:10px}
+    .muted{color:var(--muted);font-size:13px}
+    .status{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    .pill{padding:6px 10px;border-radius:999px;font-size:12px;background:#1b2438;border:1px solid #33415f}
+    .screenWrap{margin-top:14px;background:#000;border:1px solid #2b3448;border-radius:12px;padding:10px;position:relative}
+    .screen{width:100%;max-height:70vh;object-fit:contain;background:#000;border-radius:8px}
+    .screen.portrait{aspect-ratio:9/16;max-width:460px;margin:auto;display:block}
+    .screen.landscape{aspect-ratio:16/9}
+    .overlay{position:absolute;inset:10px;border-radius:8px;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;text-align:center;padding:20px}
+    .overlay.hidden{display:none}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="top">
+      <div class="brand">🎮 mini GFN (Android + Webkey)</div>
+      <div id="userBox" class="muted">Не авторизован</div>
+    </div>
+
+    <div class="panel auth" id="authPanel">
+      <div>
+        <h3>Вход</h3>
+        <input id="loginUser" placeholder="username" />
+        <input id="loginPass" placeholder="password" type="password" />
+        <button onclick="login()">Войти</button>
+      </div>
+      <div>
+        <h3>Регистрация</h3>
+        <input id="regUser" placeholder="username" />
+        <input id="regPass" placeholder="password (>=6)" type="password" />
+        <button class="ghost" onclick="registerUser()">Создать аккаунт</button>
+      </div>
+    </div>
+
+    <div class="panel" id="mainPanel" style="margin-top:12px;display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <h3 style="margin:0">Выберите игру</h3>
+        <div>
+          <button class="ghost" onclick="logout()">Выйти</button>
+        </div>
+      </div>
+      <div id="games" class="games"></div>
+
+      <div class="status">
+        <div class="pill" id="sessionStatus">Сессия: нет</div>
+        <div class="pill" id="queueStatus">Очередь: нет</div>
+        <div class="pill" id="timerStatus">Таймер: --:--</div>
+      </div>
+
+      <div class="screenWrap" id="screenWrap">
+        <img id="screen" class="screen landscape" alt="game screen" />
+        <div id="overlay" class="overlay"><div id="overlayText">Выберите игру для старта</div></div>
+      </div>
+
+      <div class="controls">
+        <button class="ghost" onclick="sendKey(21)">◀</button>
+        <button class="ghost" onclick="sendKey(19)">▲</button>
+        <button class="ghost" onclick="sendKey(20)">▼</button>
+        <button class="ghost" onclick="sendKey(22)">▶</button>
+        <button class="ghost" onclick="sendKey(23)">OK</button>
+        <button class="ghost" onclick="endSession()">Завершить сессию</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Когда слот свободен и ваша сессия не активна — отображается чёрный экран/заглушка, а не реальный экран телефона.</div>
+    </div>
+  </div>
+
+<script>
+const state = {
+  token: localStorage.getItem('token') || '',
+  me: null,
+  games: [],
+  session: null,
+  gameToken: '',
+  currentOrientation: 'landscape',
+  frameTimer: null,
+  queueTimer: null,
+  fps: 3,
+};
+
+function headers(extra={}) {
+  return {
+    'Content-Type':'application/json',
+    ...(state.token ? {Authorization:`Bearer ${state.token}`} : {}),
+    ...extra,
+  };
+}
+
+async function api(url, opts={}) {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function fmtSec(sec){
+  sec=Math.max(0,Math.floor(sec));
+  const m = String(Math.floor(sec/60)).padStart(2,'0');
+  const s = String(sec%60).padStart(2,'0');
+  return `${m}:${s}`;
+}
+
+function setOverlay(text, show=true){
+  document.getElementById('overlayText').innerText = text;
+  document.getElementById('overlay').classList.toggle('hidden', !show);
+}
+
+function setBlackScreen() {
+  const screen = document.getElementById('screen');
+  screen.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+}
+
+async function registerUser(){
+  try{
+    await api('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:regUser.value,password:regPass.value})});
+    alert('Регистрация успешна, теперь войдите');
+  }catch(e){alert(e.message)}
+}
+
+async function login(){
+  try{
+    const data = await api('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:loginUser.value,password:loginPass.value})});
+    state.token = data.token;
+    localStorage.setItem('token', state.token);
+    await bootstrap();
+  }catch(e){alert(e.message)}
+}
+
+async function logout(){
+  try{ await api('/api/logout',{method:'POST',headers:headers()}); }catch{}
+  localStorage.removeItem('token');
+  location.reload();
+}
+
+async function bootstrap(){
+  if(!state.token) return;
+  try{
+    const me = await api('/api/me',{headers:headers()});
+    state.me = me.user;
+    document.getElementById('userBox').innerText = `${state.me.username} (${state.me.role}${state.me.pro?' PRO':''})`;
+    document.getElementById('authPanel').style.display='none';
+    document.getElementById('mainPanel').style.display='block';
+
+    const games = await api('/api/games',{headers:headers()});
+    state.games = games.games;
+    state.fps = games.frameRateDefault || 3;
+    renderGames();
+
+    await refreshCurrentSession();
+    startQueuePolling();
+  }catch(e){
+    console.warn(e.message);
+    localStorage.removeItem('token');
+  }
+}
+
+function renderGames(){
+  const root = document.getElementById('games');
+  root.innerHTML='';
+  state.games.forEach(g => {
+    const el = document.createElement('div');
+    el.className='game';
+    el.innerHTML = `<div class="thumb"></div><div><b>${g.title}</b></div><div class="muted">${g.orientation}</div><button style="margin-top:8px" onclick="joinQueue('${g.id}')">Запустить</button>`;
+    root.appendChild(el);
+  });
+}
+
+async function joinQueue(gameId){
+  try{
+    setOverlay('Идёт поиск свободного телефона...');
+    const g = state.games.find(x=>x.id===gameId);
+    state.currentOrientation = g?.orientation || 'landscape';
+    applyOrientation();
+    const data = await api('/api/queue/join',{method:'POST',headers:headers(),body:JSON.stringify({gameId})});
+    if(data.mode==='assigned' || data.mode==='active_session'){
+      state.session = data.session;
+      state.gameToken = data.gameToken;
+      setOverlay('Сессия активна. Подключение к потоку...', false);
+      startFrameLoop();
+    }else{
+      document.getElementById('queueStatus').innerText = `Очередь: #${data.queue.position}, ETA ${data.queue.etaMinutes} мин`;
+      setOverlay(`Вы в очереди: #${data.queue.position}. Ожидайте свободный слот.`);
+      setBlackScreen();
+    }
+  }catch(e){
+    alert(e.message);
+    setOverlay('Ошибка старта сессии');
+  }
+}
+
+async function refreshCurrentSession(){
+  try{
+    const data = await api('/api/session/current',{headers:headers()});
+    if(data.session){
+      state.session = data.session;
+      state.gameToken = data.gameToken;
+      const g = state.games.find(x=>x.id===state.session.gameId);
+      state.currentOrientation = g?.orientation || 'landscape';
+      applyOrientation();
+      startFrameLoop();
+      setOverlay('Сессия восстановлена', false);
+    }else{
+      state.session = null;
+      state.gameToken = '';
+      stopFrameLoop();
+      setBlackScreen();
+      setOverlay('Выберите игру для старта');
+    }
+  }catch(e){console.warn(e.message)}
+}
+
+function applyOrientation(){
+  const screen = document.getElementById('screen');
+  screen.classList.remove('portrait','landscape');
+  screen.classList.add(state.currentOrientation === 'portrait' ? 'portrait' : 'landscape');
+}
+
+function startFrameLoop(){
+  stopFrameLoop();
+  const tick = async () => {
+    if(!state.session) return;
+    const endTs = new Date(state.session.endAt).getTime();
+    const sec = Math.floor((endTs - Date.now())/1000);
+    timerStatus.innerText = `Таймер: ${fmtSec(sec)}`;
+    sessionStatus.innerText = `Сессия: ${state.session.gameTitle}`;
+
+    if(sec <= 0){
+      setOverlay('Время сессии истекло');
+      stopFrameLoop();
+      state.session = null;
+      setBlackScreen();
+      return;
+    }
+
+    try{
+      const res = await fetch(`/api/session/${state.session.id}/frame?ts=${Date.now()}`, {
+        headers: headers({'X-Game-Token': state.gameToken})
+      });
+      if(!res.ok) throw new Error('stream closed');
+      const blob = await res.blob();
+      document.getElementById('screen').src = URL.createObjectURL(blob);
+      setOverlay('', false);
+    }catch(e){
+      setOverlay('Поток недоступен / сессия завершена');
+    }
+  };
+  tick();
+  state.frameTimer = setInterval(tick, Math.max(1000/state.fps, 150));
+}
+
+function stopFrameLoop(){
+  if(state.frameTimer) clearInterval(state.frameTimer);
+  state.frameTimer = null;
+}
+
+function startQueuePolling(){
+  if(state.queueTimer) clearInterval(state.queueTimer);
+  const poll = async () => {
+    if(!state.token) return;
+    try{
+      const data = await api('/api/queue/status',{headers:headers()});
+      if(data.activeSession && (!state.session || state.session.id !== data.activeSession.id)){
+        await refreshCurrentSession();
+      }
+      if(data.inQueue){
+        queueStatus.innerText = `Очередь: #${data.position}, ETA ${data.etaMinutes} мин`;
+        if(!state.session) setOverlay(`Вы в очереди: #${data.position}`);
+      }else{
+        queueStatus.innerText = 'Очередь: нет';
+      }
+      if(!state.session) sessionStatus.innerText='Сессия: нет';
+    }catch(e){console.warn(e.message)}
+  };
+  poll();
+  state.queueTimer = setInterval(poll, 4000);
+}
+
+let dragging = null;
+const screenEl = document.getElementById('screen');
+screenEl.addEventListener('click', async (ev) => {
+  if(!state.session) return;
+  const r = screenEl.getBoundingClientRect();
+  const x = ((ev.clientX - r.left) / r.width) * 1000;
+  const y = ((ev.clientY - r.top) / r.height) * 1000;
+  await sendInput({type:'tap',x,y});
+});
+screenEl.addEventListener('pointerdown', (ev) => { dragging = {x:ev.clientX,y:ev.clientY,t:Date.now()}; });
+screenEl.addEventListener('pointerup', async (ev) => {
+  if(!state.session || !dragging) return;
+  const dx = Math.abs(ev.clientX-dragging.x)+Math.abs(ev.clientY-dragging.y);
+  if(dx < 40) { dragging = null; return; }
+  const r = screenEl.getBoundingClientRect();
+  const x1 = ((dragging.x-r.left)/r.width)*1000;
+  const y1 = ((dragging.y-r.top)/r.height)*1000;
+  const x2 = ((ev.clientX-r.left)/r.width)*1000;
+  const y2 = ((ev.clientY-r.top)/r.height)*1000;
+  const duration = Math.min(1000, Date.now()-dragging.t);
+  dragging = null;
+  await sendInput({type:'swipe',x1,y1,x2,y2,duration});
+});
+
+async function sendInput(payload){
+  if(!state.session) return;
+  try{
+    await api(`/api/session/${state.session.id}/input`,{
+      method:'POST',
+      headers: headers({'X-Game-Token': state.gameToken}),
+      body: JSON.stringify(payload),
+    });
+  }catch(e){
+    console.warn(e.message);
+  }
+}
+
+function sendKey(code){ sendInput({type:'keyevent',keyCode:code}); }
+
+async function endSession(){
+  if(!state.session) return;
+  try{
+    await api(`/api/session/${state.session.id}/end`,{method:'POST',headers:headers()});
+  }catch(e){ alert(e.message); }
+  state.session = null;
+  state.gameToken='';
+  stopFrameLoop();
+  setBlackScreen();
+  setOverlay('Сессия завершена');
+}
+
+setBlackScreen();
+bootstrap();
+</script>
+</body>
+</html>
